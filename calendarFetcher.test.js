@@ -58,26 +58,51 @@ describe('calendarFetcher.resolvesToPrivateAddress', () => {
 });
 
 describe('calendarFetcher.assertRedirectDestinationAllowed', () => {
-    it('allows a redirect to a private address when the configured URL was already private', async () => {
-        await assert.doesNotReject(() => assertRedirectDestinationAllowed('http://192.168.1.5/cal.ics', true));
+    it('allows a redirect to the exact same host the configured URL resolved to (different port/path)', async () => {
+        await assert.doesNotReject(() =>
+            assertRedirectDestinationAllowed('http://192.168.1.5:8443/cal.ics', '192.168.1.5'),
+        );
+    });
+
+    it('rejects a redirect to a different private address even when the configured URL was itself private', async () => {
+        // The maintainer's exact scenario: configured 192.168.1.1 redirecting to 192.168.1.2.
+        await assert.rejects(
+            () => assertRedirectDestinationAllowed('http://192.168.1.2/secret', '192.168.1.1'),
+            /private\/internal address/,
+        );
     });
 
     it('rejects a redirect to 127.0.0.1 when the configured URL was public', async () => {
         await assert.rejects(
-            () => assertRedirectDestinationAllowed('http://127.0.0.1/cal.ics', false),
+            () => assertRedirectDestinationAllowed('http://127.0.0.1/cal.ics', '93.184.216.34'),
             /private\/internal address/,
         );
     });
 
     it('rejects a redirect to a 192.168.x.x address when the configured URL was public', async () => {
         await assert.rejects(
-            () => assertRedirectDestinationAllowed('http://192.168.1.5/cal.ics', false),
+            () => assertRedirectDestinationAllowed('http://192.168.1.5/cal.ics', '93.184.216.34'),
+            /private\/internal address/,
+        );
+    });
+
+    it('rejects a redirect to a 192.168.x.x address when the configured URL could not be resolved', async () => {
+        await assert.rejects(
+            () => assertRedirectDestinationAllowed('http://192.168.1.5/cal.ics', null),
             /private\/internal address/,
         );
     });
 
     it('allows a redirect to a public-looking address when the configured URL was public', async () => {
-        await assert.doesNotReject(() => assertRedirectDestinationAllowed('http://93.184.216.34/cal.ics', false));
+        await assert.doesNotReject(() =>
+            assertRedirectDestinationAllowed('http://93.184.216.34/cal.ics', '93.184.216.34'),
+        );
+    });
+
+    it('allows a redirect to a different public-looking address', async () => {
+        await assert.doesNotReject(() =>
+            assertRedirectDestinationAllowed('http://93.184.216.40/cal.ics', '93.184.216.34'),
+        );
     });
 });
 
@@ -125,7 +150,7 @@ describe('calendarFetcher.fetchCalendarUrl (real sockets, sslignore path)', () =
         assert.equal(body, 'CALENDAR-BODY');
     });
 
-    it('allows a configured private calendar to redirect to another private target', async () => {
+    it('allows a configured private calendar to redirect to the same host on a different port', async () => {
         const target = http.createServer((req, res) => {
             res.writeHead(200);
             res.end('REDIRECTED-BODY');
@@ -222,5 +247,43 @@ describe('calendarFetcher.fetchCalendarUrl (injected fetchImpl, default path)', 
             () => fetchCalendarUrl('http://93.184.216.34/cal.ics', { fetchImpl }),
             /HTTP 404/,
         );
+    });
+
+    it('rejects a configured private calendar (10.0.0.1) redirecting to a different private address (10.0.0.2)', async () => {
+        // The maintainer's exact scenario (192.168.1.1 -> 192.168.1.2), exercised end-to-end through fetchCalendarUrl.
+        const fetchImpl = async () => ({
+            status: 302,
+            ok: false,
+            headers: jsonHeaders('http://10.0.0.2/secret'),
+        });
+
+        await assert.rejects(
+            () => fetchCalendarUrl('http://10.0.0.1/cal.ics', { fetchImpl }),
+            /private\/internal address/,
+        );
+    });
+
+    it('allows a configured private calendar to redirect to itself on a different port', async () => {
+        const calls = [];
+        const fetchImpl = async url => {
+            calls.push(url);
+            if (url === 'http://10.0.0.1/cal.ics') {
+                return {
+                    status: 302,
+                    ok: false,
+                    headers: jsonHeaders('http://10.0.0.1:8443/cal.ics'),
+                };
+            }
+            return {
+                status: 200,
+                ok: true,
+                headers: jsonHeaders(null),
+                text: async () => 'SAME-HOST-BODY',
+            };
+        };
+
+        const body = await fetchCalendarUrl('http://10.0.0.1/cal.ics', { fetchImpl });
+        assert.equal(body, 'SAME-HOST-BODY');
+        assert.deepEqual(calls, ['http://10.0.0.1/cal.ics', 'http://10.0.0.1:8443/cal.ics']);
     });
 });
